@@ -9,17 +9,92 @@ import matplotlib.pyplot as plt
 torch.manual_seed(1)
 
 # 超参数
-TIME_STEP = 5
-UPDATE_STEP = 2
+TIME_STEP = 10
 INPUT_SIZE = 3
-OUTPUT_SIZE1 = 1
+OUTPUT_SIZE1 = 18
 OUTPUT_SIZE2 = 2
-HIDDEN_SIZE = 32
+HIDDEN_SIZE = 128
 NUM_LAYER = 1
-LR = 0.5
+LR = 0.0001
 TOTAL_RUM = 100
-MAXR = 200
+ONE_SEQ = 100
+MAXR = 50
 
+
+def unwrap(preIn, nowIn):
+    diff = nowIn - preIn
+    if(diff > 180):
+        res = nowIn
+        while(res - preIn > 180):
+            res = res - 360
+    elif(diff < -180):
+        res = nowIn
+        while(res - preIn < -180):
+            res = res + 360
+    else:
+        res = nowIn
+    return res
+
+
+def actionToSpeed(action):
+    res =[] # 0位为x轴速度， 1位为y轴速度
+    if(action == 1):
+        res = [0,1]
+    elif(action == 2):
+        res = [0,-1]
+    elif(action == -1):
+        res = [-1,0]
+    elif(action == -2):
+        res = [1,0]
+    else:
+        res = [0,0]
+    return res
+
+def disNormalize(disIn):
+    return (disIn-(math.log(MAXR)-0.5))/(2*MAXR*math.log(MAXR)/3-2*MAXR/9)
+
+def normalizeLst(inList, mode):
+    res = []
+    if mode == 'MaxMin':
+        dataMin, dataMax = inList[0], inList[0]
+        for data in inList:
+            if data < dataMin:
+                dataMin = data
+            if data > dataMax:
+                dataMax = data
+        for data in inList:
+            temp = (data-dataMin)/(dataMax-dataMin)
+            res.append(temp)
+        return dataMin, dataMax, res
+    elif mode == 'zeroMean':
+        if len(inList):
+            summary = 0
+            for data in inList:
+                summary = summary + data
+            Mean = summary/len(inList)
+            summary = 0
+            for data in inList:
+                summary = summary + (data-Mean)*(data-Mean)
+            sigma = math.sqrt(summary/len(inList))
+            for data in inList:
+                if sigma > 0:
+                    temp = (data-Mean)/sigma
+                else:
+                    temp = 0
+                res.append(temp)
+        else:
+            res = []
+            Mean = 0
+            sigma = 0
+        return res, Mean, sigma
+    elif mode == 'dis':
+        for data in inList:
+            temp = (data-(math.log(MAXR)-0.5))/(2*MAXR*math.log(MAXR)/3-2*MAXR/9)
+            res.append(temp)
+        return res
+    else:
+        return res
+                
 
 class RNN(nn.Module):
     def __init__(self, inputSize, hiddenSize, numLayer, outputSize, learningRate):
@@ -31,8 +106,7 @@ class RNN(nn.Module):
             batch_first=True,
         )
         self.out = nn.Linear(hiddenSize,outputSize)
-        self.optimizer = torch.optim.Adam(self.rnn.parameters(), lr=learningRate)
-        self.loss_func = nn.MSELoss()
+        #self.out = nn.Softmax(dim=1)
     
     def forward(self, x, h_state):
         # x        shape (batch,    time_step,  input_size)
@@ -42,10 +116,13 @@ class RNN(nn.Module):
         outs = []
         for time_step in range(r_out.size(1)): # 按照time_step将输出放入
             outs.append(self.out(r_out[:, time_step, :]))
-        return torch.stack(outs, dim=1), h_staten, h_statec
+        #outs = self.out(outs)
+        outs = torch.stack(outs, dim=1)
+        outs = torch.transpose(outs,1,2)
+        return outs, h_staten, h_statec
     
     def learn(self, prediction, y):
-        loss = self.loss_func(prediction, y.float())
+        loss = self.loss_func(prediction, angle)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -68,6 +145,10 @@ class env(object):
                 self.angle = 360.0 - math.acos(self.droneTotarget['x']/self.distance) / np.pi * 180.0
         else:
             self.angle = 0
+        if self.angle > 180:
+            self.angle = self.angle - 360
+        if self.angle < -180:
+            self.angle = self.angle + 360
 
     def xy_to_state(self):
         self.droneTotarget = {'x': self.drone['x'] - self.target['x'], 'y': self.drone['y'] - self.target['y']}
@@ -79,6 +160,10 @@ class env(object):
                 self.angle = 360.0 - math.acos(self.droneTotarget['x']/self.distance) / np.pi * 180.0
         else:
             self.angle = 0
+        if self.angle > 180:
+            self.angle = self.angle - 360
+        if self.angle < -180:
+            self.angle = self.angle + 360
     
     def step(self, action):
         if action == 1:
@@ -111,187 +196,129 @@ class env(object):
 
 
 rnn1 = RNN(INPUT_SIZE, HIDDEN_SIZE, NUM_LAYER, OUTPUT_SIZE1, LR)
-# rnn1 = rnn1.train()
+rnn1 = rnn1.train()
 print(rnn1)
-rnn2 = RNN(INPUT_SIZE, HIDDEN_SIZE, NUM_LAYER, OUTPUT_SIZE2, LR)
-rnn2 = rnn2.train()
-print(rnn2)
 
-# optimizer = torch.optim.Adam(rnn.parameters(), lr=LR)
-# loss_func = nn.MSELoss()
-h_state1 = None
-h_state2 = None
+optimizer = torch.optim.Adam(rnn1.parameters(), lr=LR)
+loss_func = nn.CrossEntropyLoss()
+
+
 
 # create world
 targetX, targetY = 5, 5
-x_drone, y_drone = (random.randint(-100,100), random.randint(-100,100))
-initDis = float(math.sqrt( (x_drone - targetX)*(x_drone - targetX) + (y_drone - targetY)*(y_drone - targetY) ))
-
-env_test = env(targetX, targetY, x_drone, y_drone)
 
 # 储存数据
-dis = []
-action = []
-speedX = []
-speedY = []
-angle = []
-droneLocX = []
-droneLocY = []
 lossRe = []
-lossRe2 = []
 angleAll = []
+angleAll2 = []
 anglePre = []
-anglePre2 = []
-disALL = []
-h_stateRe = []
-
-DataRecordDis = []
-DataRecordAngle = []
-DataRecordX = []
-DataRecordY = []
-DataRecordAction = []
-
-def unwrap(preIn, nowIn):
-    diff = nowIn - preIn
-    if(diff > 180):
-        temp = diff//360
-        res = nowIn - 360*(temp+1)
-    elif(diff < -180):
-        temp = (preIn - nowIn)//360
-        res = nowIn + 360*(temp+1)
-    else:
-        res = nowIn
-    return res
-
-
-# 用来控制无人机怎么走
-def pathControl(step:int = 0):
-    n = random.randint(0,3)
-    if n == 0:
-        n = 1
-    elif n == 1:
-        n = -1
-    elif n == 2:
-        n = 2
-    else:
-        n = -2
-    return n
-    
-
-def actionToSpeed(action):
-    res =[] # 0位为x轴速度， 1位为y轴速度
-    if(action == 1):
-        res = [0,1]
-    elif(action == 2):
-        res = [0,-1]
-    elif(action == -1):
-        res = [-1,0]
-    elif(action == -2):
-        res = [1,0]
-    else:
-        res = [0,0]
-    return res
 
 
 
-def oneRun(stepNumAction):
-    # 进行一次操作，然后保存数据
-    actionTemp = pathControl(stepNumAction)
-    env_test.step(actionTemp)
-    disTemp, angleTemp, droneTemp = env_test.giveData()
-    dis.append(disTemp)
-    speedTemp = actionToSpeed(actionTemp)
-    speedX.append(speedTemp[0])
-    speedY.append(speedTemp[1])
-    action.append(actionTemp)
-    if(len(angle)):
-        angleTemp = unwrap(angle[-1], angleTemp)
-        angle.append(angleTemp)
-    else:
-        angle.append(angleTemp)
-    droneLocX.append( float(droneTemp['x']) )
-    droneLocY.append( float(droneTemp['y']) )
-    DataRecordDis.append(disTemp)
-    DataRecordAngle.append(angleTemp)
-    DataRecordX.append( float(droneTemp['x']) )
-    DataRecordY.append( float(droneTemp['y']) )
-    DataRecordAction.append(actionTemp)
+actionDictionary = {'up':1, 'down':2, 'left':-1, 'right':-2, 'others':0} #1 - up, 2 - down, -1 - left, -2 - right, other- no action
+'''
+actionSpace = [['up', 'left', 'up', 'left', 'up'],         ['right','right','down','down','left'], 
+               ['up', 'right', 'up', 'right', 'up'],       ['right','right','up','up','left'], 
+               ['down', 'right', 'down', 'right', 'down'], ['left','left','down','down','right'],
+               ['down', 'left', 'down', 'left', 'down'],   ['left','left','up','up','right']]
+'''
+actionSpace = [['up', 'up', 'up', 'left', 'left', 'left'],         ['right','right','right','down','down','down'], 
+               ['up', 'up', 'up', 'right', 'right', 'right'],       ['right','right','right','up','up','up'], 
+               ['down', 'down', 'down', 'right', 'right', 'right'], ['left','left','left','down','down','down'],
+               ['down', 'down', 'down', 'left', 'left', 'left'],   ['left','left','left','up','up','up']]
+'''
+actionSpace = [['up', 'up',],  ['up', 'up'], ['right','right'], ['right','right'], 
+               ['down', 'down'], ['down', 'down'], ['left','left'], ['left','left']]
+'''
 
-# 定义step数
-stepNumAction = 0
 
-for _ in range(TIME_STEP):
-    oneRun(stepNumAction)
-    stepNumAction = stepNumAction + 1
+softMaxLayer = nn.Softmax(dim=0)
 
 plt.figure(1, figsize=(12, 5))
 plt.ion()
+for batchNum in range(TOTAL_RUM):
+    h_state1 = None
 
-for step in range(TOTAL_RUM):
-    print("now step:{}".format(step))
-    start, end = step*UPDATE_STEP, step*UPDATE_STEP + TIME_STEP - 1
-    if UPDATE_STEP > 1:
+    nowStep = 100
+    x_drone, y_drone = (random.randint(-MAXR,MAXR), random.randint(-MAXR,MAXR))
+    env_test = env(targetX, targetY, x_drone, y_drone)
+    actionChoose = []
+
+    for step in range(ONE_SEQ):
+        dis = []
+        speedX = []
+        speedY = []
+        angle = []
+        angleAll = []
+        print("now step:{}".format(step))
+        start, end = step*TIME_STEP, step*TIME_STEP + TIME_STEP - 1
         steps = np.linspace(start, end, TIME_STEP, dtype = np.float32, endpoint = True)
-    else:
-        steps = start
+        for _ in range(TIME_STEP):
+            if nowStep >= len(actionChoose)-1:
+                nowStep = 0
+                n = random.randint(0,7)
+                actionChoose = actionSpace[n]
+            actionTemp = actionChoose[nowStep]
+            actionTemp = actionDictionary[actionTemp]
+            nowStep = nowStep + 1
+
+            env_test.step(actionTemp)
+            disTemp, angleTemp, droneTemp = env_test.giveData()
+            #disTemp = disNormalize(math.log(disTemp+1))
+            dis.append(disTemp)
+            speedTemp = actionToSpeed(actionTemp)
+            speedX.append(speedTemp[0])
+            speedY.append(speedTemp[1])
+            if(angleTemp < 0):
+                angleTemp = angleTemp+360
+            angle.append(angleTemp*(OUTPUT_SIZE1/360))
+            angleAll.append( int(angleTemp*(OUTPUT_SIZE1/360)) )
+
+        x_np = np.array([dis, speedX,speedY])
+        x_np = np.transpose(x_np)
+        y1_np = np.array(angle)
+
+        x = Variable(torch.from_numpy(x_np[np.newaxis, :, :]))
+        y1 = Variable(torch.from_numpy(y1_np[np.newaxis,:]))
+
+        prediction1, h_staten1, h_statec1 = rnn1(x.float(), None)
+        h_state1 = (Variable(h_staten1.data), Variable(h_statec1.data))
+        loss = loss_func(prediction1, y1.long())
     
-    for _ in range(UPDATE_STEP):
-        oneRun(stepNumAction)
-        stepNumAction = stepNumAction + 1
-        del dis[0]
-        del action[0]
-        del speedX[0]
-        del speedY[0]
-        del droneLocX[0]
-        del droneLocY[0]
-        del angle[0]
-    '''
-    disMin,disMax = dis[0],dis[0]
-    disTemp = []
-    for data in dis:
-        if data > disMax:
-            disMax = data
-        if data < disMin:
-            disMin = data
-    for data in dis:
-        temp = (data - disMin)/(disMax - disMin)
-        disTemp.append(temp)
-    '''
-    disTemp = []
-    for data in dis:
-        temp = (data-2*MAXR)/(MAXR*MAXR/2)
-        disTemp.append(temp)
+        lossRe.append(loss.data)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
+        anglePre = []
+        for time_step in range(prediction1.size(2)):
+            temp = 0
+            nowPt = 0
+            startData = prediction1[0,0,time_step]
+            for data in prediction1[0,:,time_step]:
+                if data > startData:
+                    startData = start
+                    temp = nowPt
+                nowPt = nowPt + 1
+            anglePre.append(temp)
+    
 
-    x_np = np.array([disTemp, speedX,speedY])
-    x_np = np.transpose(x_np)
-    y1_np = np.array(angle)
-    y1_np = np.transpose(y1_np)
-    y2_np = np.array([droneLocX, droneLocY])
-    y2_np = np.transpose(y2_np)
-
-    x = Variable(torch.from_numpy(x_np[np.newaxis, :, :]))
-    y1 = Variable(torch.from_numpy(y1_np[np.newaxis, :, np.newaxis]))
-    y2 = Variable(torch.from_numpy(y2_np[np.newaxis, :, :]))
-
-    prediction1, h_staten1, h_statec1 = rnn1(x.float(), h_state1)
-    h_state1 = (Variable(h_staten1.data), Variable(h_statec1.data))
-
-    prediction2, h_staten2, h_statec2 = rnn1(x.float(), h_state2)
-    h_state2 = (Variable(h_staten2.data), Variable(h_statec2.data))
-    # h_state2 = Variable(h_state2.data)
-
-    loss1 = rnn1.learn(prediction1, y1)
-    lossRe.append(loss1.data)
-    loss2 = rnn2.learn(prediction2, y2)
-    lossRe2.append(loss2.data)
-
-    # plt.plot(droneLocX, droneLocY, 'r-')
-    temp = prediction1.data.numpy().flatten()
-    plt.plot(steps, y1_np, 'r-') 
-    # plt.plot(steps, temp, 'b-')
-    plt.draw(); plt.pause(0.05)
-
+        #angleForDraw = np.array(angleAll)
+        #anglePreForDraw = np.array(anglePre)
+        angleForDraw = []
+        print("target",y1.long())
+        #print("prediction",prediction1[0,:,-1].data)
+        anglePreForDraw = softMaxLayer(prediction1[0,:,-1])
+        print("softmax",anglePreForDraw.data)
+        for _ in range(OUTPUT_SIZE1):
+            angleForDraw.append(0)
+        angleForDraw[angleAll[-1]] = 1
+        #plt.scatter(steps, angleForDraw,1, c='r') 
+        #plt.scatter(steps, anglePreForDraw,1, c='b')
+        plt.clf()
+        plt.plot(np.linspace(0,OUTPUT_SIZE1-1,OUTPUT_SIZE1,dtype = np.float32, endpoint = True),anglePreForDraw.data ,'b-')
+        plt.plot(np.linspace(0,OUTPUT_SIZE1-1,OUTPUT_SIZE1,dtype = np.float32, endpoint = True),angleForDraw ,'r-')
+        plt.draw(); plt.pause(0.01)
 plt.ioff()
 plt.show()
 
@@ -300,12 +327,113 @@ plt.plot(lossRe)
 plt.show()
 plt.close()
 
-plt.figure(1, figsize=(12,5))
-plt.plot(lossRe2)
+
+torch.save(rnn1.state_dict(), './rnn1AngleDiscrete.pth') # 保存参数
+# torch.save(rnn2.state_dict(), './rnn2Loc.pth') # 保存参数
+
+####################################################################################################################
+####################################################################################################################
+####################################################################################################################
+####################################################################################################################
+####################################################################################################################
+####################################################################################################################
+####################################################################################################################
+####################################################################################################################
+####################################################################################################################
+####################################################################################################################
+####################################################################################################################
+
+#rnn1.eval()
+
+# create world
+targetX, targetY = 5, 5
+
+# 储存数据
+lossRe = []
+angleAll = []
+anglePre = []
+
+plt.figure(1, figsize=(12, 5))
+plt.ion()
+
+nowStep = 100
+x_drone, y_drone = (random.randint(-MAXR,MAXR), random.randint(-MAXR,MAXR))
+env_test = env(targetX, targetY, x_drone, y_drone)
+actionChoose = []
+
+for step in range(100):
+    dis = []
+    speedX = []
+    speedY = []
+    angle = []
+    angleAll = []
+    
+
+    print("now step:{}".format(step))
+
+
+    start, end = step*TIME_STEP, step*TIME_STEP + TIME_STEP - 1
+    steps = np.linspace(start, end, TIME_STEP, dtype = np.float32, endpoint = True)
+    for _ in range(TIME_STEP):
+        if nowStep >= len(actionChoose)-1:
+            nowStep = 0
+            n = random.randint(0,7)
+            actionChoose = actionSpace[n]
+        actionTemp = actionChoose[nowStep]
+        actionTemp = actionDictionary[actionTemp]
+        nowStep = nowStep + 1
+
+        env_test.step(actionTemp)
+        disTemp, angleTemp, droneTemp = env_test.giveData()
+        #disTemp = disNormalize(math.log(disTemp+1))
+        dis.append(disTemp)
+        speedTemp = actionToSpeed(actionTemp)
+        speedX.append(speedTemp[0])
+        speedY.append(speedTemp[1])
+        if(angleTemp < 0):
+            angleTemp = angleTemp+360
+        angle.append(angleTemp*(OUTPUT_SIZE1/360))
+        angleAll.append( int(angleTemp*(OUTPUT_SIZE1/360)) )
+
+    x_np = np.array([dis, speedX,speedY])
+    x_np = np.transpose(x_np)
+    y1_np = np.array(angle)
+
+    x = Variable(torch.from_numpy(x_np[np.newaxis, :, :]))
+    y1 = Variable(torch.from_numpy(y1_np[np.newaxis,:]))
+
+    prediction1, h_staten1, h_statec1 = rnn1(x.float(), None)
+    h_state1 = (Variable(h_staten1.data), Variable(h_statec1.data))
+    loss = loss_func(prediction1, y1.long())
+
+
+    anglePre = []
+    for time_step in range(prediction1.size(2)):
+        temp = 0
+        nowPt = 0
+        startData = prediction1[0,0,time_step]
+        for data in prediction1[0,:,time_step]:
+            if data > startData:
+                startData = start
+                temp = nowPt
+            nowPt = nowPt + 1
+        anglePre.append(temp)
+    print(prediction1[0,:,-1].data)
+    print(y1.long())
+
+    angleForDraw = []
+    print("target",y1.long())
+    #print("prediction",prediction1[0,:,-1].data)
+    anglePreForDraw = softMaxLayer(prediction1[0,:,-1])
+    print("softmax",anglePreForDraw.data)
+    for _ in range(OUTPUT_SIZE1):
+        angleForDraw.append(0)
+    angleForDraw[angleAll[-1]] = 1
+    #plt.scatter(steps, angleForDraw,1, c='r') 
+    #plt.scatter(steps, anglePreForDraw,1, c='b')
+    plt.clf()
+    plt.plot(np.linspace(0,OUTPUT_SIZE1-1,OUTPUT_SIZE1,dtype = np.float32, endpoint = True),anglePreForDraw.data ,'b-')
+    plt.plot(np.linspace(0,OUTPUT_SIZE1-1,OUTPUT_SIZE1,dtype = np.float32, endpoint = True),angleForDraw ,'r-')
+    plt.draw(); plt.pause(0.01)
+plt.ioff()
 plt.show()
-plt.close()
-
-torch.save(rnn1.state_dict(), './rnn1Angle.pth') # 保存参数
-torch.save(rnn2.state_dict(), './rnn2Loc.pth') # 保存参数
-# rnn.eval()
-
